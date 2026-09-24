@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Auction Platform</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 30px; background-color: #f4f6f8; }
+        .container { max-width: 900px; margin: auto; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 15px; }
+        .auction-card { border: 1px solid #ddd; padding: 15px; border-radius: 6px; background: #fff; display: flex; flex-direction: column; justify-content: space-between; }
+        .auction-card h4 { margin: 0 0 10px 0; color: #333; }
+        input { width: 90%; padding: 8px; margin: 5px 0; }
+        button { padding: 8px 15px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; margin-top: 5px; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #cccccc; cursor: not-allowed; }
+        .history-btn { background: #6c757d; }
+        .history-btn:hover { background: #5a6268; }
+        .logout-btn { background: #dc3545; }
+        .logout-btn:hover { background: #a71d2a; }
+        .hidden { display: none !important; }
+        .price { font-weight: bold; color: #28a745; font-size: 1.1em; }
+        .timer-text { font-weight: bold; color: #d9534f; }
+
+        /* MODAL STYLING */
+        .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .modal-content { background: white; padding: 25px; border-radius: 8px; width: 420px; max-height: 80vh; overflow-y: auto; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .close-btn { background: transparent; color: #333; font-size: 1.5rem; cursor: pointer; border: none; padding: 0; }
+        .history-list { list-style: none; padding: 0; margin-top: 15px; }
+        .history-item { padding: 10px; border-bottom: 1px solid #f0f0f0; display: flex; justify-content: space-between; align-items: center; }
+        .history-item small { color: #666; font-size: 0.85em; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Real-Time Live Auction Platform</h2>
+
+    <!-- AUTH SECTION -->
+    <div id="auth-section" class="card">
+        <h3>Login / Register</h3>
+        <input type="text" id="username" placeholder="Username"><br>
+        <input type="password" id="password" placeholder="Password"><br><br>
+        <button onclick="handleRegister()">Register</button>
+        <button onclick="handleLogin()">Login</button>
+    </div>
+
+    <!-- USER LOGGED IN STATUS -->
+    <div id="user-section" class="card hidden">
+        <p>Logged in as: <strong id="user-display"></strong></p>
+        <button class="logout-btn" onclick="handleLogout()">Logout</button>
+    </div>
+
+    <!-- CREATE AUCTION ITEM SECTION -->
+    <div id="create-section" class="card">
+        <h3>Create New Auction Item</h3>
+        <input type="text" id="item-title" placeholder="Item Title"><br>
+        <input type="text" id="item-desc" placeholder="Description"><br>
+        <input type="number" id="item-price" placeholder="Starting Price ($)"><br>
+        <input type="number" id="item-duration" placeholder="Duration (Minutes)"><br><br>
+        <button onclick="createAuction()">Create Item</button>
+    </div>
+
+    <!-- ACTIVE AUCTIONS GRID -->
+    <div class="card">
+        <h3>Active Auctions</h3>
+        <button onclick="loadAuctions()" style="margin-bottom: 15px;">Refresh Auctions</button>
+        <div id="auctions-grid" class="grid">
+            <p>Loading active auctions...</p>
+        </div>
+    </div>
+
+    <!-- LIVE BID FEED -->
+    <div class="card">
+        <h3>Live Bids Activity Log</h3>
+        <ul id="bids-list"></ul>
+    </div>
+</div>
+
+<!-- BID HISTORY MODAL -->
+<div id="history-modal" class="modal hidden">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="modal-title" style="margin: 0;">Bid History</h3>
+            <button class="close-btn" onclick="closeHistoryModal()">&times;</button>
+        </div>
+        <ul id="history-list" class="history-list"></ul>
+    </div>
+</div>
+
+<script>
+    const API_BASE = "http://localhost:7788";
+    let stompClient = null;
+    let timerInterval = null;
+
+    // 1. REGISTER
+    async function handleRegister() {
+        const username = document.getElementById("username").value;
+        const password = document.getElementById("password").value;
+        if (!username || !password) return alert("Enter username and password.");
+
+        try {
+            const res = await fetch(`${API_BASE}/api/auth/register`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username, password })
+            });
+            alert(await res.text());
+        } catch (err) {
+            alert("Backend server connection failed.");
+        }
+    }
+
+    // 2. LOGIN
+    async function handleLogin() {
+        const username = document.getElementById("username").value;
+        const password = document.getElementById("password").value;
+        if (!username || !password) return alert("Enter username and password.");
+
+        try {
+            const res = await fetch(`${API_BASE}/api/auth/login`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username, password })
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                localStorage.setItem("jwtToken", data.token);
+                localStorage.setItem("username", data.username);
+                updateUI();
+                connectWebSocket();
+                loadAuctions();
+                alert("Login Successful!");
+            } else {
+                alert("Login Failed: " + await res.text());
+            }
+        } catch (err) {
+            alert("Backend server connection failed.");
+        }
+    }
+
+    // 3. LOGOUT
+    function handleLogout() {
+        localStorage.removeItem("jwtToken");
+        localStorage.removeItem("username");
+        if (stompClient) stompClient.disconnect();
+        updateUI();
+        alert("Logged out successfully.");
+    }
+
+    // 4. LOAD AUCTION ITEMS
+    async function loadAuctions() {
+        const token = localStorage.getItem("jwtToken");
+        const headers = {};
+        if (token) headers["Authorization"] = "Bearer " + token;
+
+        try {
+            const res = await fetch(`${API_BASE}/api/auctions`, { headers });
+            if (!res.ok) return;
+            const items = await res.json();
+            renderAuctions(items);
+        } catch (err) {
+            console.error("Error loading auctions:", err);
+        }
+    }
+
+    // 5. RENDER AUCTION CARDS
+    function renderAuctions(items) {
+        const container = document.getElementById("auctions-grid");
+        if (!items || items.length === 0) {
+            container.innerHTML = "<p>No active auctions found. Create one above!</p>";
+            return;
+        }
+
+        container.innerHTML = items.map(item => `
+            <div class="auction-card" id="auction-card-${item.id}">
+                <h4>#${item.id} - ${item.title}</h4>
+                <p>${item.description || 'No description'}</p>
+                <p>Current Price: <span class="price" id="price-${item.id}">$${item.currentHighestBid}</span></p>
+                <p>Highest Bidder: <strong id="bidder-${item.id}">${item.highestBidder}</strong></p>
+                <p>Time Remaining: <strong id="timer-${item.id}" class="timer-text" data-endtime="${item.endTime}">Calculating...</strong></p>
+                <input type="number" id="bid-input-${item.id}" placeholder="New Bid Amount">
+                <button id="bid-btn-${item.id}" onclick="placeBid(${item.id})">Place Bid</button>
+                <button class="history-btn" onclick="openHistoryModal(${item.id}, '${item.title}')">View Bid History</button>
+            </div>
+        `).join('');
+
+        startCountdownTimers();
+    }
+
+    // 6. COUNTDOWN TIMERS LOGIC
+    function startCountdownTimers() {
+        if (timerInterval) clearInterval(timerInterval);
+
+        timerInterval = setInterval(() => {
+            const timerElements = document.querySelectorAll("[id^='timer-']");
+
+            timerElements.forEach(elem => {
+                const endTimeStr = elem.getAttribute("data-endtime");
+                if (!endTimeStr) return;
+
+                const endTime = new Date(endTimeStr).getTime();
+                const now = new Date().getTime();
+                const distance = endTime - now;
+
+                const auctionId = elem.id.replace("timer-", "");
+                const bidBtn = document.getElementById(`bid-btn-${auctionId}`);
+                const bidInput = document.getElementById(`bid-input-${auctionId}`);
+
+                if (distance < 0) {
+                    elem.textContent = "AUCTION CLOSED";
+                    elem.style.color = "red";
+                    if (bidBtn) bidBtn.disabled = true;
+                    if (bidInput) bidInput.disabled = true;
+                } else {
+                    const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                    const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+                    const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+                    elem.textContent = `${hours}h ${minutes}m ${seconds}s`;
+                    elem.style.color = "#d9534f";
+                }
+            });
+        }, 1000);
+    }
+
+    // 7. CREATE AUCTION ITEM
+    async function createAuction() {
+        const token = localStorage.getItem("jwtToken");
+        if (!token) return alert("Log in first to create items!");
+
+        const title = document.getElementById("item-title").value;
+        const description = document.getElementById("item-desc").value;
+        const startingPrice = document.getElementById("item-price").value;
+        const durationInMinutes = document.getElementById("item-duration").value;
+
+        if (!title || !startingPrice) return alert("Title and starting price required.");
+
+        try {
+            const res = await fetch(`${API_BASE}/api/auctions`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + token
+                },
+                body: JSON.stringify({
+                    title,
+                    description,
+                    startingPrice: Number(startingPrice),
+                    durationInMinutes: Number(durationInMinutes || 60)
+                })
+            });
+
+            if (res.ok) {
+                alert("Auction Item Created!");
+                loadAuctions();
+            } else {
+                alert("Failed to create auction: " + await res.text());
+            }
+        } catch (err) {
+            alert("Error creating auction item.");
+        }
+    }
+
+    // 8. PLACE BID
+    async function placeBid(auctionId) {
+        const token = localStorage.getItem("jwtToken");
+        if (!token) return alert("Log in first to place a bid!");
+
+        const amountInput = document.getElementById(`bid-input-${auctionId}`);
+        const amount = amountInput ? amountInput.value : null;
+
+        if (!amount) return alert("Enter a bid amount.");
+
+        try {
+            const res = await fetch(`${API_BASE}/api/auctions/${auctionId}/bids`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + token
+                },
+                body: JSON.stringify({
+                    auctionItemId: Number(auctionId),
+                    amount: Number(amount)
+                })
+            });
+
+            const text = await res.text();
+            if (!res.ok) {
+                alert("Bid Error: " + text);
+            } else {
+                amountInput.value = "";
+            }
+        } catch (err) {
+            alert("Network error submitting bid.");
+        }
+    }
+
+    // 9. BID HISTORY MODAL FUNCTIONS
+    async function openHistoryModal(auctionId, title) {
+        const modal = document.getElementById("history-modal");
+        const list = document.getElementById("history-list");
+        document.getElementById("modal-title").textContent = `History: ${title}`;
+        list.innerHTML = "<li>Loading bids...</li>";
+        modal.classList.remove("hidden");
+
+        const token = localStorage.getItem("jwtToken");
+        const headers = {};
+        if (token) headers["Authorization"] = "Bearer " + token;
+
+        try {
+            const res = await fetch(`${API_BASE}/api/auctions/${auctionId}/bids`, { headers });
+            if (!res.ok) {
+                list.innerHTML = "<li style='padding: 10px;'>Failed to load bid history.</li>";
+                return;
+            }
+
+            const bids = await res.json();
+            if (!bids || bids.length === 0) {
+                list.innerHTML = "<li style='padding: 10px; color: #666;'>No bids placed on this item yet.</li>";
+                return;
+            }
+
+            list.innerHTML = bids.map(b => {
+                const formattedTime = b.timestamp ? new Date(b.timestamp).toLocaleString() : 'Recently';
+                return `
+                    <li class="history-item">
+                        <div>
+                            <strong>${b.bidderName}</strong><br>
+                            <small>${formattedTime}</small>
+                        </div>
+                        <span class="price">$${b.bidAmount}</span>
+                    </li>
+                `;
+            }).join('');
+        } catch (err) {
+            list.innerHTML = "<li style='padding: 10px; color: red;'>Error fetching bid history.</li>";
+        }
+    }
+
+    function closeHistoryModal() {
+        document.getElementById("history-modal").classList.add("hidden");
+    }
+
+    // 10. WEBSOCKET SUBSCRIPTIONS
+    function connectWebSocket() {
+        const token = localStorage.getItem("jwtToken");
+        const socket = new SockJS(`${API_BASE}/ws-auction`);
+        stompClient = Stomp.over(socket);
+
+        const headers = token ? { "Authorization": "Bearer " + token } : {};
+
+        stompClient.connect(headers, function () {
+            console.log("WebSocket connected.");
+
+            stompClient.subscribe("/topic/auctions", function (message) {
+                const updatedAuction = JSON.parse(message.body);
+
+                const priceElem = document.getElementById(`price-${updatedAuction.id}`);
+                const bidderElem = document.getElementById(`bidder-${updatedAuction.id}`);
+
+                if (priceElem) priceElem.textContent = `$${updatedAuction.currentHighestBid}`;
+                if (bidderElem) bidderElem.textContent = updatedAuction.highestBidder;
+
+                const list = document.getElementById("bids-list");
+                const li = document.createElement("li");
+                li.textContent = `User ${updatedAuction.highestBidder} bid $${updatedAuction.currentHighestBid} on Item #${updatedAuction.id}`;
+                list.prepend(li);
+            });
+
+            stompClient.subscribe("/topic/errors", function (message) {
+                const err = JSON.parse(message.body);
+                alert("Live Bid Error: " + err.message);
+            });
+        });
+    }
+
+    function updateUI() {
+        const username = localStorage.getItem("username");
+        if (username) {
+            document.getElementById("auth-section").classList.add("hidden");
+            document.getElementById("user-section").classList.remove("hidden");
+            document.getElementById("user-display").textContent = username;
+        } else {
+            document.getElementById("auth-section").classList.remove("hidden");
+            document.getElementById("user-section").classList.add("hidden");
+        }
+    }
+
+    window.onload = function() {
+        updateUI();
+        loadAuctions();
+        if (localStorage.getItem("jwtToken")) {
+            connectWebSocket();
+        }
+    };
+</script>
+
+</body>
+</html>
